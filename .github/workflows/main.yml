@@ -1,8 +1,8 @@
-name: Daily Market Briefing (REST API Version)
+name: Daily Market Briefing (Auto-Detect Model)
 
 on:
   schedule:
-    - cron: '0 22 * * 1-5' # 평일 아침 7시 (KST)
+    - cron: '0 22 * * 1-5' # 평일 아침 7시
   workflow_dispatch: # 수동 실행
 
 jobs:
@@ -16,8 +16,8 @@ jobs:
           python-version: '3.10'
 
       - name: Install Libraries
-        # requests 라이브러리 사용 (훨씬 안정적)
-        run: pip install requests python-telegram-bot yfinance pytz
+        # google-generativeai 라이브러리를 최신으로 설치
+        run: pip install -U google-generativeai python-telegram-bot yfinance pytz
 
       - name: Run Bot Script
         env:
@@ -27,24 +27,25 @@ jobs:
         shell: python
         run: |
           import os
-          import requests
           import asyncio
           import yfinance as yf
+          import google.generativeai as genai
           from telegram import Bot
           from datetime import datetime
           import pytz
-          import json
 
-          # --- 1. 환경 변수 및 설정 ---
+          # --- 1. 환경 변수 확인 ---
           GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
           TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
           CHAT_ID = os.environ.get("CHAT_ID")
 
           if not GEMINI_API_KEY or not TELEGRAM_TOKEN:
-              print("❌ Error: API Key 또는 Token이 없습니다. GitHub Secrets를 확인하세요.")
+              print("❌ Error: API Key 누락")
               exit(1)
 
-          # --- 2. 데이터 수집 함수 ---
+          genai.configure(api_key=GEMINI_API_KEY)
+
+          # --- 2. 데이터 수집 (정상 작동 확인됨) ---
           def get_market_data():
               tickers = {
                   "S&P 500": "^GSPC",
@@ -64,82 +65,83 @@ jobs:
                   try:
                       stock = yf.Ticker(ticker)
                       hist = stock.history(period="5d")
+                      if len(hist) < 2: continue
                       
-                      if len(hist) < 2:
-                          continue
-                          
                       current = hist['Close'].iloc[-1]
                       prev = hist['Close'].iloc[-2]
                       change = ((current - prev) / prev) * 100
-                      
                       icon = "🔺" if change > 0 else "🔹"
                       data_summary.append(f"- {name}: {current:,.2f} ({icon} {change:.2f}%)")
-                  except Exception as e:
-                      print(f"⚠️ {name} 데이터 수집 실패: {e}")
-                      
+                  except:
+                      pass # 에러 무시하고 다음 것 진행
               return "\n".join(data_summary)
 
-          # --- 3. Gemini API 직접 호출 함수 (핵심 수정) ---
+          # --- 3. 모델 자동 탐색 및 브리핑 생성 (핵심 수정) ---
           def generate_briefing(market_data):
               kst = pytz.timezone('Asia/Seoul')
               today_str = datetime.now(kst).strftime("%Y년 %m월 %d일")
               
-              prompt_text = f"""
-              당신은 금융 전문가입니다. 아래 데이터를 보고 텔레그램용 '모닝 브리핑'을 작성하세요.
-              
+              prompt = f"""
               [날짜]: {today_str}
-              [시장 데이터]:
+              [증시 데이터]:
               {market_data}
               
-              <작성 가이드>
-              1. 제목: '📅 {today_str} 글로벌 증시 브리핑'
-              2. 요약: S&P500과 나스닥을 보고 시장이 상승세인지 하락세인지 한 줄로 명확히 요약.
-              3. 상세: 상승 섹터와 하락 섹터를 구분하고, 특히 반도체와 국채금리/VIX의 관계를 설명.
-              4. 결론: 투자자를 위한 한 줄 조언.
-              5. 톤앤매너: 전문적이지만 쉽게, 이모지 사용, 500자 이내.
+              위 데이터를 보고 텔레그램용 '모닝 브리핑'을 작성해.
+              조건:
+              1. 제목: '📅 {today_str} 시장 요약'
+              2. 내용: S&P500/나스닥 분위기, 주요 섹터 흐름, VIX/금리 해석.
+              3. 결론: 투자자 조언 1줄.
+              4. 길이: 500자 이내, 이모지 사용.
               """
 
-              # 라이브러리 대신 직접 URL 호출
-              url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-              
-              headers = {'Content-Type': 'application/json'}
-              data = {
-                  "contents": [{
-                      "parts": [{"text": prompt_text}]
-                  }]
-              }
-
-              print("🧠 Gemini에게 분석 요청 중 (REST API)...")
+              print("🤖 사용 가능한 AI 모델 검색 중...")
+              valid_model_name = None
               
               try:
-                  response = requests.post(url, headers=headers, json=data)
+                  # 1. 내 API 키로 쓸 수 있는 모델 리스트를 싹 다 긁어옵니다.
+                  for m in genai.list_models():
+                      if 'generateContent' in m.supported_generation_methods:
+                          print(f"  - 발견된 모델: {m.name}")
+                          # 우리가 선호하는 모델이 있으면 그걸 우선 선택
+                          if 'gemini-1.5-flash' in m.name:
+                              valid_model_name = m.name
+                              break
+                          if 'gemini-pro' in m.name and valid_model_name is None:
+                              valid_model_name = m.name
                   
-                  if response.status_code == 200:
-                      result = response.json()
-                      # 응답에서 텍스트 추출
-                      return result['candidates'][0]['content']['parts'][0]['text']
-                  else:
-                      print(f"❌ API 호출 실패 코드: {response.status_code}")
-                      print(f"❌ 에러 내용: {response.text}")
-                      return f"AI 분석 오류 발생 (Code {response.status_code}).\n\n[데이터]\n{market_data}"
-                      
-              except Exception as e:
-                  print(f"❌ 요청 중 예외 발생: {e}")
-                  return f"시스템 오류 발생.\n\n[데이터]\n{market_data}"
+                  # 2. 선호 모델을 못 찾았으면, 목록의 맨 첫 번째 모델을 씁니다.
+                  if not valid_model_name:
+                      # 다시 검색해서 아무거나 하나 집음
+                      for m in genai.list_models():
+                          if 'generateContent' in m.supported_generation_methods:
+                              valid_model_name = m.name
+                              break
+                  
+                  if not valid_model_name:
+                      return f"❌ 사용 가능한 모델이 없습니다. API 권한을 확인하세요.\n\n[데이터]\n{market_data}"
 
-          # --- 4. 메인 실행 ---
+                  print(f"🎯 최종 선택된 모델: {valid_model_name}")
+                  
+                  # 3. 선택된 모델로 생성 요청
+                  model = genai.GenerativeModel(valid_model_name)
+                  response = model.generate_content(prompt)
+                  return response.text
+
+              except Exception as e:
+                  print(f"❌ AI 생성 중 오류: {e}")
+                  return f"AI 분석 실패 (오류: {e}).\n\n[원본 데이터]\n{market_data}"
+
+          # --- 4. 실행 ---
           async def main():
               raw_data = get_market_data()
-              if not raw_data:
-                  raw_data = "데이터 수집 실패. yfinance 상태를 확인하세요."
+              if not raw_data: raw_data = "데이터 수집 실패"
               
               briefing = generate_briefing(raw_data)
               
-              print("🚀 텔레그램 전송 시작...")
               bot = Bot(token=TELEGRAM_TOKEN)
-              # 마크다운 문제 방지를 위해 HTML 모드 사용하거나 텍스트만 전송
+              # 마크다운 없이 안전하게 텍스트만 보냄
               await bot.send_message(chat_id=CHAT_ID, text=briefing)
-              print("✅ 전송 완료!")
+              print("✅ 전송 완료")
 
           if __name__ == "__main__":
               asyncio.run(main())
