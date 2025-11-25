@@ -1,0 +1,134 @@
+name: Daily Market Briefing (Single File)
+
+on:
+  schedule:
+    # UTC 22:00 = 한국 시간 익일 오전 07:00 (월~금 실행)
+    - cron: '0 22 * * 1-5'
+  workflow_dispatch: # 수동 실행 버튼
+
+jobs:
+  send-briefing:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Libraries
+        # 필요한 라이브러리를 여기서 바로 설치합니다.
+        run: pip install google-generativeai python-telegram-bot yfinance pytz
+
+      - name: Run Bot Script
+        env:
+          # GitHub Secrets에 저장된 키를 환경 변수로 불러옵니다.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        shell: python
+        run: |
+          import os
+          import asyncio
+          import yfinance as yf
+          import google.generativeai as genai
+          from telegram import Bot
+          from datetime import datetime
+          import pytz
+
+          # --- 1. 환경 변수 설정 ---
+          GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+          TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+          CHAT_ID = os.environ.get("CHAT_ID")
+
+          if not GEMINI_API_KEY or not TELEGRAM_TOKEN:
+              print("Error: API Key 또는 Token이 설정되지 않았습니다.")
+              exit(1)
+
+          # --- 2. Gemini 설정 ---
+          genai.configure(api_key=GEMINI_API_KEY)
+          model = genai.GenerativeModel('gemini-1.5-flash')
+
+          # --- 3. 데이터 수집 함수 ---
+          def get_market_data():
+              tickers = {
+                  "S&P 500": "^GSPC",
+                  "NASDAQ": "^IXIC",
+                  "VIX (공포지수)": "^VIX",
+                  "10년물 국채금리": "^TNX",
+                  "기술(Tech)": "XLK",
+                  "금융": "XLF",
+                  "헬스케어": "XLV",
+                  "반도체": "SOXX"
+              }
+              
+              data_summary = []
+              print("증시 데이터 수집 중...")
+              
+              for name, ticker in tickers.items():
+                  try:
+                      stock = yf.Ticker(ticker)
+                      # 최근 5일치 가져옴 (주말/휴일 고려 넉넉히)
+                      hist = stock.history(period="5d")
+                      
+                      if len(hist) < 2:
+                          continue
+                          
+                      current = hist['Close'].iloc[-1]
+                      prev = hist['Close'].iloc[-2]
+                      change = ((current - prev) / prev) * 100
+                      
+                      icon = "🔺" if change > 0 else "🔹"
+                      data_summary.append(f"- {name}: {current:,.2f} ({icon} {change:.2f}%)")
+                  except Exception as e:
+                      print(f"{name} 데이터 수집 실패: {e}")
+                      
+              return "\n".join(data_summary)
+
+          # --- 4. 브리핑 생성 함수 ---
+          def generate_briefing(market_data):
+              kst = pytz.timezone('Asia/Seoul')
+              today_str = datetime.now(kst).strftime("%Y년 %m월 %d일")
+              
+              prompt = f"""
+              [날짜]: {today_str}
+              [데이터]:
+              {market_data}
+              
+              위 데이터를 바탕으로 텔레그램 메신저용 '모닝 경제 브리핑'을 작성해줘.
+              
+              <작성 조건>
+              1. 맨 첫 줄에 '📅 {today_str} 글로벌 증시 브리핑' 제목을 달 것.
+              2. S&P500과 나스닥을 분석하여 '오늘의 시장 분위기'를 한 줄로 요약할 것.
+              3. 상승/하락 섹터를 명확히 구분하고 반도체/기술주 흐름을 언급할 것.
+              4. VIX와 국채금리를 통해 투자 심리를 간단히 분석할 것.
+              5. 마지막에 투자자를 위한 짧은 한 줄 조언을 넣을 것.
+              6. 전체 길이는 모바일에서 보기 좋게 500자 이내로 하고 이모지를 적절히 사용할 것.
+              """
+              
+              print("Gemini에게 보고서 요청 중...")
+              response = model.generate_content(prompt)
+              return response.text
+
+          # --- 5. 텔레그램 전송 및 메인 실행 ---
+          async def main():
+              # 데이터 가져오기
+              raw_data = get_market_data()
+              if not raw_data:
+                  raw_data = "데이터 수집 실패. API 연결을 확인하세요."
+              
+              # AI 요약
+              briefing = generate_briefing(raw_data)
+              
+              # 전송
+              print("텔레그램 전송 시작...")
+              bot = Bot(token=TELEGRAM_TOKEN)
+              
+              # 마크다운 충돌 방지를 위해 특수문자 일부 처리 (간이)
+              # 텔레그램은 MarkdownV2를 쓸 때 엄격하므로, 그냥 기본 모드나 HTML을 쓰거나 
+              # 안전하게 plain text에 가깝게 보냅니다. 여기서는 안전하게 Markdown 설정을 뺍니다.
+              await bot.send_message(chat_id=CHAT_ID, text=briefing)
+              print("전송 완료!")
+
+          if __name__ == "__main__":
+              asyncio.run(main())
