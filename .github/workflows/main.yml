@@ -1,8 +1,8 @@
-name: Daily Market Briefing (Final Fix)
+name: Daily Market Briefing (REST API Version)
 
 on:
   schedule:
-    - cron: '0 22 * * 1-5' # 한국 시간 아침 7시
+    - cron: '0 22 * * 1-5' # 평일 아침 7시 (KST)
   workflow_dispatch: # 수동 실행
 
 jobs:
@@ -16,7 +16,8 @@ jobs:
           python-version: '3.10'
 
       - name: Install Libraries
-        run: pip install -U google-generativeai python-telegram-bot yfinance pytz
+        # requests 라이브러리 사용 (훨씬 안정적)
+        run: pip install requests python-telegram-bot yfinance pytz
 
       - name: Run Bot Script
         env:
@@ -26,23 +27,22 @@ jobs:
         shell: python
         run: |
           import os
+          import requests
           import asyncio
           import yfinance as yf
-          import google.generativeai as genai
           from telegram import Bot
           from datetime import datetime
           import pytz
+          import json
 
-          # --- 1. 환경 변수 설정 ---
+          # --- 1. 환경 변수 및 설정 ---
           GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
           TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
           CHAT_ID = os.environ.get("CHAT_ID")
 
           if not GEMINI_API_KEY or not TELEGRAM_TOKEN:
-              print("Error: API Key 또는 Token 설정 누락")
+              print("❌ Error: API Key 또는 Token이 없습니다. GitHub Secrets를 확인하세요.")
               exit(1)
-
-          genai.configure(api_key=GEMINI_API_KEY)
 
           # --- 2. 데이터 수집 함수 ---
           def get_market_data():
@@ -58,7 +58,7 @@ jobs:
               }
               
               data_summary = []
-              print("증시 데이터 수집 중...")
+              print("📊 증시 데이터 수집 중...")
               
               for name, ticker in tickers.items():
                   try:
@@ -75,61 +75,71 @@ jobs:
                       icon = "🔺" if change > 0 else "🔹"
                       data_summary.append(f"- {name}: {current:,.2f} ({icon} {change:.2f}%)")
                   except Exception as e:
-                      print(f"{name} 수집 실패: {e}")
+                      print(f"⚠️ {name} 데이터 수집 실패: {e}")
                       
               return "\n".join(data_summary)
 
-          # --- 3. 브리핑 생성 함수 (오류 방지 로직 추가) ---
+          # --- 3. Gemini API 직접 호출 함수 (핵심 수정) ---
           def generate_briefing(market_data):
               kst = pytz.timezone('Asia/Seoul')
               today_str = datetime.now(kst).strftime("%Y년 %m월 %d일")
               
-              prompt = f"""
+              prompt_text = f"""
+              당신은 금융 전문가입니다. 아래 데이터를 보고 텔레그램용 '모닝 브리핑'을 작성하세요.
+              
               [날짜]: {today_str}
-              [데이터]:
+              [시장 데이터]:
               {market_data}
               
-              위 데이터를 바탕으로 텔레그램 메신저용 '모닝 경제 브리핑'을 작성해줘.
-              
-              <작성 조건>
-              1. 첫 줄 제목: '📅 {today_str} 글로벌 증시 브리핑'
-              2. 시장 요약: S&P500과 나스닥 등락을 보고 시장 분위기 한 줄 요약.
-              3. 섹터 분석: 상승/하락 섹터와 반도체 흐름 언급.
-              4. 심리 분석: VIX와 국채금리로 투자 심리 언급.
-              5. 마무리: 투자자를 위한 짧은 한 줄 조언.
-              6. 길이: 모바일 가독성을 위해 500자 이내, 이모지 사용.
+              <작성 가이드>
+              1. 제목: '📅 {today_str} 글로벌 증시 브리핑'
+              2. 요약: S&P500과 나스닥을 보고 시장이 상승세인지 하락세인지 한 줄로 명확히 요약.
+              3. 상세: 상승 섹터와 하락 섹터를 구분하고, 특히 반도체와 국채금리/VIX의 관계를 설명.
+              4. 결론: 투자자를 위한 한 줄 조언.
+              5. 톤앤매너: 전문적이지만 쉽게, 이모지 사용, 500자 이내.
               """
+
+              # 라이브러리 대신 직접 URL 호출
+              url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
               
-              # 사용할 모델 후보 리스트 (앞에서부터 순서대로 시도)
-              candidate_models = ["gemini-1.5-flash", "gemini-pro", "gemini-1.5-pro-latest"]
+              headers = {'Content-Type': 'application/json'}
+              data = {
+                  "contents": [{
+                      "parts": [{"text": prompt_text}]
+                  }]
+              }
+
+              print("🧠 Gemini에게 분석 요청 중 (REST API)...")
               
-              print("Gemini에게 보고서 요청 중...")
-              
-              for model_name in candidate_models:
-                  try:
-                      print(f"모델 시도 중: {model_name}")
-                      model = genai.GenerativeModel(model_name)
-                      response = model.generate_content(prompt)
-                      return response.text
-                  except Exception as e:
-                      print(f"⚠️ {model_name} 오류 발생: {e}")
-                      continue # 다음 모델 시도
-              
-              # 모든 모델이 실패했을 경우
-              return f"❌ AI 분석 실패. 원본 데이터를 참고하세요.\n\n[데이터]\n{market_data}"
+              try:
+                  response = requests.post(url, headers=headers, json=data)
+                  
+                  if response.status_code == 200:
+                      result = response.json()
+                      # 응답에서 텍스트 추출
+                      return result['candidates'][0]['content']['parts'][0]['text']
+                  else:
+                      print(f"❌ API 호출 실패 코드: {response.status_code}")
+                      print(f"❌ 에러 내용: {response.text}")
+                      return f"AI 분석 오류 발생 (Code {response.status_code}).\n\n[데이터]\n{market_data}"
+                      
+              except Exception as e:
+                  print(f"❌ 요청 중 예외 발생: {e}")
+                  return f"시스템 오류 발생.\n\n[데이터]\n{market_data}"
 
           # --- 4. 메인 실행 ---
           async def main():
               raw_data = get_market_data()
               if not raw_data:
-                  raw_data = "데이터 수집 실패."
+                  raw_data = "데이터 수집 실패. yfinance 상태를 확인하세요."
               
               briefing = generate_briefing(raw_data)
               
-              print("텔레그램 전송 시작...")
+              print("🚀 텔레그램 전송 시작...")
               bot = Bot(token=TELEGRAM_TOKEN)
+              # 마크다운 문제 방지를 위해 HTML 모드 사용하거나 텍스트만 전송
               await bot.send_message(chat_id=CHAT_ID, text=briefing)
-              print("전송 완료!")
+              print("✅ 전송 완료!")
 
           if __name__ == "__main__":
               asyncio.run(main())
