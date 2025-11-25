@@ -1,10 +1,9 @@
-name: Daily Market Briefing (Single File)
+name: Daily Market Briefing (Final Fix)
 
 on:
   schedule:
-    # UTC 22:00 = 한국 시간 익일 오전 07:00 (월~금 실행)
-    - cron: '0 22 * * 1-5'
-  workflow_dispatch: # 수동 실행 버튼
+    - cron: '0 22 * * 1-5' # 한국 시간 아침 7시
+  workflow_dispatch: # 수동 실행
 
 jobs:
   send-briefing:
@@ -14,10 +13,9 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10' # 3.9에서 3.10으로 변경 (호환성 해결)
+          python-version: '3.10'
 
       - name: Install Libraries
-        # -U 옵션을 넣어 최신 버전을 강제로 설치합니다.
         run: pip install -U google-generativeai python-telegram-bot yfinance pytz
 
       - name: Run Bot Script
@@ -41,21 +39,12 @@ jobs:
           CHAT_ID = os.environ.get("CHAT_ID")
 
           if not GEMINI_API_KEY or not TELEGRAM_TOKEN:
-              print("Error: API Key 또는 Token이 설정되지 않았습니다.")
+              print("Error: API Key 또는 Token 설정 누락")
               exit(1)
 
-          # --- 2. Gemini 설정 ---
           genai.configure(api_key=GEMINI_API_KEY)
-          
-          # 모델명을 'latest' 별칭으로 변경하여 인식 오류 방지
-          try:
-              model = genai.GenerativeModel('gemini-1.5-flash-latest')
-          except:
-              # 만약 flash 모델이 안 되면 가장 기본인 pro 모델로 자동 전환
-              print("Flash 모델 로드 실패, Pro 모델로 전환합니다.")
-              model = genai.GenerativeModel('gemini-pro')
 
-          # --- 3. 데이터 수집 함수 ---
+          # --- 2. 데이터 수집 함수 ---
           def get_market_data():
               tickers = {
                   "S&P 500": "^GSPC",
@@ -86,11 +75,11 @@ jobs:
                       icon = "🔺" if change > 0 else "🔹"
                       data_summary.append(f"- {name}: {current:,.2f} ({icon} {change:.2f}%)")
                   except Exception as e:
-                      print(f"{name} 데이터 수집 실패: {e}")
+                      print(f"{name} 수집 실패: {e}")
                       
               return "\n".join(data_summary)
 
-          # --- 4. 브리핑 생성 함수 ---
+          # --- 3. 브리핑 생성 함수 (오류 방지 로직 추가) ---
           def generate_briefing(market_data):
               kst = pytz.timezone('Asia/Seoul')
               today_str = datetime.now(kst).strftime("%Y년 %m월 %d일")
@@ -103,26 +92,37 @@ jobs:
               위 데이터를 바탕으로 텔레그램 메신저용 '모닝 경제 브리핑'을 작성해줘.
               
               <작성 조건>
-              1. 맨 첫 줄에 '📅 {today_str} 글로벌 증시 브리핑' 제목을 달 것.
-              2. S&P500과 나스닥을 분석하여 '오늘의 시장 분위기'를 한 줄로 요약할 것.
-              3. 상승/하락 섹터를 명확히 구분하고 반도체/기술주 흐름을 언급할 것.
-              4. VIX와 국채금리를 통해 투자 심리를 간단히 분석할 것.
-              5. 마지막에 투자자를 위한 짧은 한 줄 조언을 넣을 것.
-              6. 전체 길이는 모바일에서 보기 좋게 500자 이내로 하고 이모지를 적절히 사용할 것.
+              1. 첫 줄 제목: '📅 {today_str} 글로벌 증시 브리핑'
+              2. 시장 요약: S&P500과 나스닥 등락을 보고 시장 분위기 한 줄 요약.
+              3. 섹터 분석: 상승/하락 섹터와 반도체 흐름 언급.
+              4. 심리 분석: VIX와 국채금리로 투자 심리 언급.
+              5. 마무리: 투자자를 위한 짧은 한 줄 조언.
+              6. 길이: 모바일 가독성을 위해 500자 이내, 이모지 사용.
               """
               
+              # 사용할 모델 후보 리스트 (앞에서부터 순서대로 시도)
+              candidate_models = ["gemini-1.5-flash", "gemini-pro", "gemini-1.5-pro-latest"]
+              
               print("Gemini에게 보고서 요청 중...")
-              try:
-                  response = model.generate_content(prompt)
-                  return response.text
-              except Exception as e:
-                  return f"AI 분석 중 오류 발생: {str(e)}\n\n[원본 데이터]\n{market_data}"
+              
+              for model_name in candidate_models:
+                  try:
+                      print(f"모델 시도 중: {model_name}")
+                      model = genai.GenerativeModel(model_name)
+                      response = model.generate_content(prompt)
+                      return response.text
+                  except Exception as e:
+                      print(f"⚠️ {model_name} 오류 발생: {e}")
+                      continue # 다음 모델 시도
+              
+              # 모든 모델이 실패했을 경우
+              return f"❌ AI 분석 실패. 원본 데이터를 참고하세요.\n\n[데이터]\n{market_data}"
 
-          # --- 5. 텔레그램 전송 및 메인 실행 ---
+          # --- 4. 메인 실행 ---
           async def main():
               raw_data = get_market_data()
               if not raw_data:
-                  raw_data = "데이터 수집 실패. API 연결을 확인하세요."
+                  raw_data = "데이터 수집 실패."
               
               briefing = generate_briefing(raw_data)
               
