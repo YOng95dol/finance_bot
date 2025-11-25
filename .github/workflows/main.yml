@@ -1,4 +1,4 @@
-name: Daily Market Briefing (Auto-Detect Model)
+name: Daily Market Briefing (Final Polish)
 
 on:
   schedule:
@@ -16,7 +16,6 @@ jobs:
           python-version: '3.10'
 
       - name: Install Libraries
-        # google-generativeai 라이브러리를 최신으로 설치
         run: pip install -U google-generativeai python-telegram-bot yfinance pytz
 
       - name: Run Bot Script
@@ -45,7 +44,7 @@ jobs:
 
           genai.configure(api_key=GEMINI_API_KEY)
 
-          # --- 2. 데이터 수집 (정상 작동 확인됨) ---
+          # --- 2. 데이터 수집 ---
           def get_market_data():
               tickers = {
                   "S&P 500": "^GSPC",
@@ -71,65 +70,76 @@ jobs:
                       prev = hist['Close'].iloc[-2]
                       change = ((current - prev) / prev) * 100
                       icon = "🔺" if change > 0 else "🔹"
-                      data_summary.append(f"- {name}: {current:,.2f} ({icon} {change:.2f}%)")
+                      # 데이터 포맷을 AI가 읽기 쉽게 정리
+                      data_summary.append(f"{name}: {current:,.2f} ({icon} {change:+.2f}%)")
                   except:
-                      pass # 에러 무시하고 다음 것 진행
+                      pass
               return "\n".join(data_summary)
 
-          # --- 3. 모델 자동 탐색 및 브리핑 생성 (핵심 수정) ---
+          # --- 3. 브리핑 생성 (프롬프트 대폭 수정) ---
           def generate_briefing(market_data):
               kst = pytz.timezone('Asia/Seoul')
               today_str = datetime.now(kst).strftime("%Y년 %m월 %d일")
               
+              # 🔥 핵심 수정: AI에게 '비서'가 아닌 '리포터'처럼 행동하라고 지시
               prompt = f"""
-              [날짜]: {today_str}
-              [증시 데이터]:
+              [역할]
+              당신은 감정이 없는 금융 데이터 분석 봇입니다.
+              인사말("물론입니다", "안녕하세요" 등)이나 서론/결론의 잡담을 절대 쓰지 마세요.
+              제공된 [데이터]의 수치를 반드시 포함하여 요약하세요.
+
+              [데이터]
               {market_data}
-              
-              위 데이터를 보고 텔레그램용 '모닝 브리핑'을 작성해.
-              조건:
-              1. 제목: '📅 {today_str} 시장 요약'
-              2. 내용: S&P500/나스닥 분위기, 주요 섹터 흐름, VIX/금리 해석.
-              3. 결론: 투자자 조언 1줄.
-              4. 길이: 500자 이내, 이모지 사용.
+
+              [출력 양식]
+              📅 {today_str} 글로벌 증시 브리핑
+
+              1. 📊 주요 지수
+              - S&P 500과 NASDAQ의 마감 지수와 등락률을 문장에 포함하여 설명하세요.
+              - 시장 전반의 분위기(상승/하락/혼조)를 명확히 하세요.
+
+              2. 📈 주요 지표 및 심리
+              - 국채금리와 VIX 지수의 구체적 수치를 언급하며 시장 심리를 분석하세요.
+
+              3. 🏗 섹터별 흐름
+              - 상승 섹터와 하락 섹터를 나누고, 특히 반도체/기술주의 등락률 수치를 언급하세요.
+
+              4. 💡 투자 코멘트
+              - 간결한 한 줄 조언.
+
+              [주의사항]
+              - 이모지를 적절히 사용하여 가독성을 높이세요.
+              - 구체적인 숫자(예: 6,700, +0.5%)가 빠지면 안 됩니다.
               """
 
-              print("🤖 사용 가능한 AI 모델 검색 중...")
+              print("🤖 모델 탐색 및 생성 중...")
               valid_model_name = None
               
+              # 모델 자동 탐색 로직 (유지)
               try:
-                  # 1. 내 API 키로 쓸 수 있는 모델 리스트를 싹 다 긁어옵니다.
                   for m in genai.list_models():
                       if 'generateContent' in m.supported_generation_methods:
-                          print(f"  - 발견된 모델: {m.name}")
-                          # 우리가 선호하는 모델이 있으면 그걸 우선 선택
                           if 'gemini-1.5-flash' in m.name:
                               valid_model_name = m.name
                               break
                           if 'gemini-pro' in m.name and valid_model_name is None:
                               valid_model_name = m.name
                   
-                  # 2. 선호 모델을 못 찾았으면, 목록의 맨 첫 번째 모델을 씁니다.
                   if not valid_model_name:
-                      # 다시 검색해서 아무거나 하나 집음
                       for m in genai.list_models():
                           if 'generateContent' in m.supported_generation_methods:
                               valid_model_name = m.name
                               break
                   
                   if not valid_model_name:
-                      return f"❌ 사용 가능한 모델이 없습니다. API 권한을 확인하세요.\n\n[데이터]\n{market_data}"
+                      return f"❌ 모델 오류.\n\n{market_data}"
 
-                  print(f"🎯 최종 선택된 모델: {valid_model_name}")
-                  
-                  # 3. 선택된 모델로 생성 요청
                   model = genai.GenerativeModel(valid_model_name)
                   response = model.generate_content(prompt)
-                  return response.text
+                  return response.text.strip() # 앞뒤 공백 제거
 
               except Exception as e:
-                  print(f"❌ AI 생성 중 오류: {e}")
-                  return f"AI 분석 실패 (오류: {e}).\n\n[원본 데이터]\n{market_data}"
+                  return f"❌ 분석 실패.\n\n{market_data}"
 
           # --- 4. 실행 ---
           async def main():
@@ -139,7 +149,6 @@ jobs:
               briefing = generate_briefing(raw_data)
               
               bot = Bot(token=TELEGRAM_TOKEN)
-              # 마크다운 없이 안전하게 텍스트만 보냄
               await bot.send_message(chat_id=CHAT_ID, text=briefing)
               print("✅ 전송 완료")
 
