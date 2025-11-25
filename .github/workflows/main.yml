@@ -14,15 +14,14 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.9'
+          python-version: '3.10' # 3.9에서 3.10으로 변경 (호환성 해결)
 
       - name: Install Libraries
-        # 필요한 라이브러리를 여기서 바로 설치합니다.
-        run: pip install google-generativeai python-telegram-bot yfinance pytz
+        # -U 옵션을 넣어 최신 버전을 강제로 설치합니다.
+        run: pip install -U google-generativeai python-telegram-bot yfinance pytz
 
       - name: Run Bot Script
         env:
-          # GitHub Secrets에 저장된 키를 환경 변수로 불러옵니다.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
@@ -47,7 +46,14 @@ jobs:
 
           # --- 2. Gemini 설정 ---
           genai.configure(api_key=GEMINI_API_KEY)
-          model = genai.GenerativeModel('gemini-1.5-flash')
+          
+          # 모델명을 'latest' 별칭으로 변경하여 인식 오류 방지
+          try:
+              model = genai.GenerativeModel('gemini-1.5-flash-latest')
+          except:
+              # 만약 flash 모델이 안 되면 가장 기본인 pro 모델로 자동 전환
+              print("Flash 모델 로드 실패, Pro 모델로 전환합니다.")
+              model = genai.GenerativeModel('gemini-pro')
 
           # --- 3. 데이터 수집 함수 ---
           def get_market_data():
@@ -68,7 +74,6 @@ jobs:
               for name, ticker in tickers.items():
                   try:
                       stock = yf.Ticker(ticker)
-                      # 최근 5일치 가져옴 (주말/휴일 고려 넉넉히)
                       hist = stock.history(period="5d")
                       
                       if len(hist) < 2:
@@ -107,26 +112,22 @@ jobs:
               """
               
               print("Gemini에게 보고서 요청 중...")
-              response = model.generate_content(prompt)
-              return response.text
+              try:
+                  response = model.generate_content(prompt)
+                  return response.text
+              except Exception as e:
+                  return f"AI 분석 중 오류 발생: {str(e)}\n\n[원본 데이터]\n{market_data}"
 
           # --- 5. 텔레그램 전송 및 메인 실행 ---
           async def main():
-              # 데이터 가져오기
               raw_data = get_market_data()
               if not raw_data:
                   raw_data = "데이터 수집 실패. API 연결을 확인하세요."
               
-              # AI 요약
               briefing = generate_briefing(raw_data)
               
-              # 전송
               print("텔레그램 전송 시작...")
               bot = Bot(token=TELEGRAM_TOKEN)
-              
-              # 마크다운 충돌 방지를 위해 특수문자 일부 처리 (간이)
-              # 텔레그램은 MarkdownV2를 쓸 때 엄격하므로, 그냥 기본 모드나 HTML을 쓰거나 
-              # 안전하게 plain text에 가깝게 보냅니다. 여기서는 안전하게 Markdown 설정을 뺍니다.
               await bot.send_message(chat_id=CHAT_ID, text=briefing)
               print("전송 완료!")
 
